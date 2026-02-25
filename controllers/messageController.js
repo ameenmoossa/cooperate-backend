@@ -19,7 +19,7 @@ export const getMessages = async (req, res) => {
   }
 };
 
-/* ================= SEND MESSAGE (⭐ FIXED) ================= */
+/* ================= SEND MESSAGE ================= */
 export const sendMessage = async (req, res) => {
   try {
     const {
@@ -36,7 +36,6 @@ export const sendMessage = async (req, res) => {
       approvalStatus,
     } = req.body;
 
-    /* ⭐ FIX — derive real uploads path */
     let finalFilePath = filePath;
 
     if (!finalFilePath && fileUrl && fileUrl.includes("/uploads/")) {
@@ -61,12 +60,10 @@ export const sendMessage = async (req, res) => {
       readBy: [],
     });
 
-    /* AI background */
     runAI(message, req, finalFilePath).catch(err =>
       console.error("AI background error:", err)
     );
 
-    /* Activity log */
     await logActivity({
       userId: senderId,
       groupId: message.groupId,
@@ -91,103 +88,6 @@ export const sendMessage = async (req, res) => {
 };
 
 /* ================= AI BACKGROUND ================= */
-const MAX_DOC_TEXT = 6000;
-
-const normalizeExtractedText = (text = "") =>
-  String(text).replace(/\s+/g, " ").trim().slice(0, MAX_DOC_TEXT);
-
-const decodePdfString = (value = "") =>
-  value
-    .replace(/\\\(/g, "(")
-    .replace(/\\\)/g, ")")
-    .replace(/\\\\/g, "\\")
-    .replace(/\\r/g, "\r")
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t");
-
-const extractTextFromPdfBuffer = (buffer) => {
-  const raw = buffer.toString("latin1");
-  const chunks = [];
-
-  const tjRegex = /\(([^()]*)\)\s*Tj/g;
-  let match;
-  while ((match = tjRegex.exec(raw)) !== null) {
-    const decoded = decodePdfString(match[1]);
-    if (decoded.trim()) chunks.push(decoded);
-  }
-
-  const tjArrayRegex = /\[(.*?)\]\s*TJ/gs;
-  while ((match = tjArrayRegex.exec(raw)) !== null) {
-    const inner = match[1];
-    const parts = inner.match(/\(([^()]*)\)/g) || [];
-    parts.forEach((part) => {
-      const decoded = decodePdfString(part.slice(1, -1));
-      if (decoded.trim()) chunks.push(decoded);
-    });
-  }
-
-  return normalizeExtractedText(chunks.join(" "));
-};
-
-const extractReadableStrings = (buffer) => {
-  const raw = buffer.toString("latin1");
-  const matches = raw.match(/[ -~\n\r\t]{4,}/g) || [];
-  return normalizeExtractedText(matches.join(" "));
-};
-
-const extractDocumentText = async (filePath, fileName = "") => {
-  if (!filePath || !fs.existsSync(filePath)) return "";
-
-  const ext = path.extname(fileName || filePath).toLowerCase();
-
-  try {
-    if (ext === ".pdf") {
-      const buffer = await fsp.readFile(filePath);
-
-      try {
-        const pdfParseMod = await import("pdf-parse");
-        const pdfParse = pdfParseMod?.default || pdfParseMod;
-        const parsed = await pdfParse(buffer);
-        const text = normalizeExtractedText(parsed?.text || "");
-        if (text) return text;
-      } catch {}
-
-      const parsedFallback = extractTextFromPdfBuffer(buffer);
-      if (parsedFallback) return parsedFallback;
-
-      return extractReadableStrings(buffer);
-    }
-
-    if (ext === ".docx") {
-      const buffer = await fsp.readFile(filePath);
-      try {
-        const mammothMod = await import("mammoth");
-        const mammoth = mammothMod?.default || mammothMod;
-        const result = await mammoth.extractRawText({ buffer });
-        const text = normalizeExtractedText(result?.value || "");
-        if (text) return text;
-      } catch {}
-
-      return extractReadableStrings(buffer);
-    }
-
-    if ([".txt", ".csv", ".md", ".json", ".log"].includes(ext)) {
-      const text = await fsp.readFile(filePath, "utf8");
-      return normalizeExtractedText(text);
-    }
-
-    const fallbackBuffer = await fsp.readFile(filePath);
-    try {
-      return normalizeExtractedText(fallbackBuffer.toString("utf8"));
-    } catch {
-      return extractReadableStrings(fallbackBuffer);
-    }
-  } catch {
-    return "";
-  }
-};
-
-/* ⭐ runAI stays EXACT (unchanged) */
 export async function runAI(message, req, uploadedFilePath = "") {
   try {
     const io = req.app.get("io");
@@ -216,6 +116,7 @@ export async function runAI(message, req, uploadedFilePath = "") {
       return path.resolve(process.cwd(), cleaned);
     };
 
+    /* ⭐ FIXED VOICE TRANSCRIPTION (Render delay fix) */
     if (message.type === "voice" && ai.transcribeVoiceMessage) {
       const localAudioPath =
         resolveLocalUploadPath(uploadedFilePath) ||
@@ -223,6 +124,14 @@ export async function runAI(message, req, uploadedFilePath = "") {
         resolveLocalUploadPath(message.fileUrl);
 
       if (!localAudioPath) return;
+
+      /* ⭐ wait small delay */
+      await new Promise(r => setTimeout(r, 1500));
+
+      if (!fs.existsSync(localAudioPath)) {
+        console.log("VOICE FILE NOT FOUND:", localAudioPath);
+        return;
+      }
 
       const transcript = await ai.transcribeVoiceMessage(localAudioPath);
 
@@ -241,7 +150,6 @@ export async function runAI(message, req, uploadedFilePath = "") {
     console.error("AI processing failed:", err);
   }
 }
-
 
 /* ================= MARK READ ================= */
 export const markMessageAsRead = async (req, res) => {
